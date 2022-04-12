@@ -9,7 +9,7 @@
 #include <systemd/sd-bus.h>
 
 // sd-bus error checking
-#define SD_CHECK(ret, errmsg, onerror) if (ret < 0) { fprintf(stderr, "ERROR: %s: %s\n", errmsg, strerror(-ret)); onerror; }
+#define SD_CHECK(ret, errmsg, onerror) do { if (ret < 0) { fprintf(stderr, "ERROR: %s: %s\n", errmsg, strerror(-ret)); onerror; } } while(0)
 
 // Status property values
 char *STATUS_ACTIVE  = "Active";
@@ -28,7 +28,7 @@ typedef struct Properties {
 static int onActivate(sd_bus_message *msg, void *data, sd_bus_error *error) {
     Properties *properties = data;
     sd_bus *bus = sd_bus_message_get_bus(msg);
-    int ret;
+    int ret = 0;
 
     ret = system(properties->enabled ? properties->cmd_off : properties->cmd_on);
     if (ret == -1 || WEXITSTATUS(ret) != 0) {
@@ -171,9 +171,9 @@ int main(int argc, char **argv) {
     SD_CHECK(ret, "Failed to register DBus object", goto sd_bus_slot);
 
     // Store our unique name
-    const char *unique_name;
+    const char *unique_name = NULL;
     ret = sd_bus_get_unique_name(bus, &unique_name);
-    SD_CHECK(ret, "Failed to read unique DBus name", goto sd_bus_slot)
+    SD_CHECK(ret, "Failed to read unique DBus name", goto sd_bus_slot);
 
     // Register as StatusNotifierItem
     sd_bus_error error = SD_BUS_ERROR_NULL;
