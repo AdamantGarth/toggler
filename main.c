@@ -73,6 +73,42 @@ static const sd_bus_vtable SNI[] = {
     SD_BUS_VTABLE_END
 };
 
+static sd_bus_error registerAsSNI(sd_bus *bus, const char *unique_name) {
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *response = NULL;
+    // Intentionally ignoring the return value - should be checkd by a caller
+    sd_bus_call_method(bus, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem", &error, &response, "s", unique_name);
+    sd_bus_message_unref(response);
+    return error;
+}
+
+// Handle the (dis)appearance of the StatusNotifierWatcher service
+static int onNameOwnerChanged(sd_bus_message *msg, void *data, sd_bus_error *error) {
+    const char *unique_name = data;
+    sd_bus *bus = sd_bus_message_get_bus(msg);
+
+    const char *name, *old_owner, *new_owner;
+    int ret = 0;    
+    ret = sd_bus_message_read_basic(msg, 's', &name);
+    if (ret < 0) return ret;
+    ret = sd_bus_message_read_basic(msg, 's', &old_owner);
+    if (ret < 0) return ret;
+    ret = sd_bus_message_read_basic(msg, 's', &new_owner);
+    if (ret < 0) return ret;
+
+    if (new_owner != NULL) {
+        sd_bus_error err = registerAsSNI(bus, unique_name);
+        if (sd_bus_error_is_set(&err)) {
+            ret = sd_bus_error_set_const(error, err.name, err.message);
+        } else {
+            fprintf(stderr, "INFO: Successfully registered as StatusNotifierItem\n\n");
+        }
+        sd_bus_error_free(&err);
+    }
+
+    return ret;
+}
+
 int main(int argc, char **argv) {
     Properties properties = {
         .cmd_on = "echo Enabled",
@@ -138,12 +174,12 @@ int main(int argc, char **argv) {
             properties.Title = optarg;
             break;
         case 's':
-            if (strncmp("on", optarg, sizeof("on")-1) == 0) {
+            if (strcmp("on", optarg) == 0) {
                 properties.Status = STATUS_ACTIVE;
                 properties.IconName = properties.icon_on;
                 break;
             }
-            if (strncmp("off", optarg, sizeof("off")-1) == 0) {
+            if (strcmp("off", optarg) == 0) {
                 properties.Status = STATUS_PASSIVE;
                 properties.IconName = properties.icon_off;
                 break;
@@ -163,25 +199,30 @@ int main(int argc, char **argv) {
     // Open DBus connection
     sd_bus *bus = NULL;
     ret = sd_bus_open_user(&bus);
-    SD_CHECK(ret, "Failed to open DBus connection", goto sd_bus);
+    SD_CHECK(ret, "Failed to open DBus connection", goto bus);
 
     // Register DBus object
-    sd_bus_slot *slot = NULL;
-    ret = sd_bus_add_object_vtable(bus, &slot, "/StatusNotifierItem", "org.kde.StatusNotifierItem", SNI, &properties);
-    SD_CHECK(ret, "Failed to register DBus object", goto sd_bus_slot);
+    ret = sd_bus_add_object_vtable(bus, NULL, "/StatusNotifierItem", "org.kde.StatusNotifierItem", SNI, &properties);
+    SD_CHECK(ret, "Failed to register DBus object", goto bus);
 
     // Store our unique name
     const char *unique_name = NULL;
     ret = sd_bus_get_unique_name(bus, &unique_name);
-    SD_CHECK(ret, "Failed to read unique DBus name", goto sd_bus_slot);
+    SD_CHECK(ret, "Failed to read unique DBus name", goto bus);
 
-    // Register as StatusNotifierItem
-    sd_bus_error error = SD_BUS_ERROR_NULL;
-    sd_bus_message *response = NULL;
-    ret = sd_bus_call_method(bus, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem", &error, &response, "s", unique_name);
-    if (ret < 0) {
-        fprintf(stderr, "ERROR: Failed to register as StatusNotifierItem: %s\n", error.message);
-        goto finish;
+    // Try registering as StatusNotifierItem
+    sd_bus_error error = registerAsSNI(bus, unique_name);
+    if (sd_bus_error_is_set(&error)) {
+        if (strcmp(error.name, SD_BUS_ERROR_SERVICE_UNKNOWN) == 0) {
+            // StatusNotifierWatcher isn't initialized yet
+            fprintf(stderr, "WARNING: StatusNotifierWatcher is not available, waiting for it to appear...\n");
+            ret = sd_bus_add_match(bus, NULL, "foobarlmaotype='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.kde.StatusNotifierWatcher'",
+                onNameOwnerChanged,(char *) unique_name);
+	        SD_CHECK(ret, "Failed to add DBus matching rule", goto finish);
+        } else {
+            fprintf(stderr, "ERROR: Failed to register as StatusNotifierItem: %s\n", error.message);
+            goto finish;
+        }      
     }
 
     // Process requests
@@ -195,13 +236,9 @@ int main(int argc, char **argv) {
         ret = sd_bus_wait(bus, UINT64_MAX);
         SD_CHECK(ret, "Failed to wait for an event", goto finish);
     }
-
 finish:
     sd_bus_error_free(&error);
-    sd_bus_message_unref(response);
-sd_bus_slot:
-    sd_bus_slot_unref(slot);
-sd_bus:
+bus:
     sd_bus_unref(bus);
 
     return ret < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
